@@ -120,7 +120,7 @@ patches_coord = patches_database['C'].astype(np.float32)
 """ Processing Functions """
 
 def process_data(anim, phase, gait, type='flat'):
-    
+    #此函数用来准备训练数据所需的X,Y,以及control paras P
     """ Do FK """
     global_xforms = Animation.transforms_global(anim)
     global_positions = global_xforms[:,:,:3,3] / global_xforms[:,:,3:,3]
@@ -174,7 +174,9 @@ def process_data(anim, phase, gait, type='flat'):
     
     """ Phase """
     
-    dphase = phase[1:] - phase[:-1]
+    #相邻帧之间phase的变化量
+    dphase = phase[1:] - phase[:-1]  
+    #将负的phase变化量变成正的，如-0.1会变成1-0.1 = 0.9
     dphase[dphase < 0] = (1.0-phase[:-1]+phase[1:])[dphase < 0]
     
     """ Adjust Crouching Gait Value """
@@ -182,8 +184,9 @@ def process_data(anim, phase, gait, type='flat'):
     if type == 'flat':
         crouch_low, crouch_high = 80, 130
         head = 16
+        #gait shape：(4086,6)  head的y坐标（即upward）超过80太多，就clip为1，gait value就为0；反之为1 
         gait[:-1,3] = 1 - np.clip((global_positions[:-1,head,1] - 80) / (130 - 80), 0, 1)
-        gait[-1,3] = gait[-2,3]
+        gait[-1,3] = gait[-2,3]   #最后一帧的gait value等于前一帧的gait value
 
     """ Start Windows """
     
@@ -191,14 +194,23 @@ def process_data(anim, phase, gait, type='flat'):
     
     for i in range(window, len(anim)-window-1, 1):
         
+        #分别为root positions，directions 和gaits
+        #当i = 60时，global_positions[i-window:i+window:10,0]即为global_positions[60+60:60+60:10,0]共12个sample
+        #global_positions[i-window:i+window:10,0]：shape（12，3），12个sample的position
+        #global_positions[i:i+1,0]：shape（1，3）第i个sample的position
+        #root_rotation[i:i+1,0]：第i个sample中root相对于世界坐标系所做的rotation（12，1），每个rotation都用四元数表达
+        #为什么？？
+        #四元数左乘向量，代表对向量进行旋转？向量本身是global cord中的向量，左乘了rotation后，变成了相对于root cord的local向量？
         rootposs = root_rotation[i:i+1,0] * (global_positions[i-window:i+window:10,0] - global_positions[i:i+1,0])
+        
+        #forward本身也是global cord中的方向，左乘四元数后变成了相对于root坐标系的方向
         rootdirs = root_rotation[i:i+1,0] * forward[i-window:i+window:10]    
         rootgait = gait[i-window:i+window:10]
         
         Pc.append(phase[i])
         
         Xc.append(np.hstack([
-                rootposs[:,0].ravel(), rootposs[:,2].ravel(), # Trajectory Pos
+                rootposs[:,0].ravel(), rootposs[:,2].ravel(), # Trajectory Pos 只需要x与z值，不需要y
                 rootdirs[:,0].ravel(), rootdirs[:,2].ravel(), # Trajectory Dir
                 rootgait[:,0].ravel(), rootgait[:,1].ravel(), # Trajectory Gait
                 rootgait[:,2].ravel(), rootgait[:,3].ravel(), 
@@ -212,15 +224,15 @@ def process_data(anim, phase, gait, type='flat'):
         
         Yc.append(np.hstack([
                 root_velocity[i,0,0].ravel(), # Root Vel X
-                root_velocity[i,0,2].ravel(), # Root Vel Y
-                root_rvelocity[i].ravel(),    # Root Rot Vel
+                root_velocity[i,0,2].ravel(), # Root Vel Z
+                root_rvelocity[i].ravel(),    # Root Rotation Vel
                 dphase[i],                    # Change in Phase
                 np.concatenate([feet_l[i], feet_r[i]], axis=-1), # Contacts
                 rootposs_next[:,0].ravel(), rootposs_next[:,2].ravel(), # Next Trajectory Pos
                 rootdirs_next[:,0].ravel(), rootdirs_next[:,2].ravel(), # Next Trajectory Dir
                 local_positions[i].ravel(),  # Joint Pos
                 local_velocities[i].ravel(), # Joint Vel
-                local_rotations[i].ravel()   # Joint Rot
+                local_rotations[i].ravel()   # Joint Rotation
                 ]))
                                                 
     return np.array(Pc), np.array(Xc), np.array(Yc)
@@ -229,10 +241,14 @@ def process_data(anim, phase, gait, type='flat'):
 """ Sampling Patch Heightmap """    
 
 def patchfunc(P, Xp, hscale=3.937007874, vscale=3.0):
-    
+    '''
+    P:patches
+    Xp:feet_down_xz - feet_down_xz_mean
+    '''
+    #将Xp移到patch的中心
     Xp = Xp / hscale + np.array([P.shape[1]//2, P.shape[2]//2])
     
-    A = np.fmod(Xp, 1.0)
+    A = np.fmod(Xp, 1.0)   #将Xp中的元素分别对1.0求余
     X0 = np.clip(np.floor(Xp).astype(np.int), 0, np.array([P.shape[1]-1, P.shape[2]-1]))
     X1 = np.clip(np.ceil (Xp).astype(np.int), 0, np.array([P.shape[1]-1, P.shape[2]-1]))
     
@@ -270,18 +286,25 @@ def process_heights(anim, nsamples=10, type='flat'):
         np.cross(across, np.array([[0,1,0]])), direction_filterwidth, axis=0, mode='nearest')    
     forward = forward / np.sqrt((forward**2).sum(axis=-1))[...,np.newaxis]
 
+    #[0,0,1]是z方即世界坐标系中的forward方向，
+    #计算得到character的forward方向与世界坐标系forward方向之间的旋转
     root_rotation = Quaternions.between(forward, 
-        np.array([[0,0,1]]).repeat(len(forward), axis=0))[:,np.newaxis] 
+        np.array([[0,0,1]]).repeat(len(forward), axis=0))[:,np.newaxis]   
 
     """ Foot Contacts """
     
     fid_l, fid_r = np.array([4,5]), np.array([9,10])
     velfactor = np.array([0.02, 0.02])
     
-    feet_l_x = (global_positions[1:,fid_l,0] - global_positions[:-1,fid_l,0])**2
+    #global_positions[1:,fid_l,0]：shape:(4086,31,3)第一个维度上只选取index为1以后的，
+    #第二个维度上只选取index为fid_l中数字（也就是4，5）的，第三个维度上只选取index为0的,得到的shape:(4085,2)
+    #global_positions[1:...]-global_positions[:-1,...]的原因是：
+    #[a2,a3,a4]-[a1,a2,a3] = [a2-a1,a3-a2,a4-a3]即为相邻两个frame之间，左脚在x方向上移动的距离。
+    feet_l_x = (global_positions[1:,fid_l,0] - global_positions[:-1,fid_l,0])**2  
     feet_l_y = (global_positions[1:,fid_l,1] - global_positions[:-1,fid_l,1])**2
     feet_l_z = (global_positions[1:,fid_l,2] - global_positions[:-1,fid_l,2])**2
-    feet_l = (((feet_l_x + feet_l_y + feet_l_z) < velfactor))
+    #速度小于velfactor的视为foot contact，但是为什么要把三个相加？
+    feet_l = (((feet_l_x + feet_l_y + feet_l_z) < velfactor))  #shape:4085,2
     
     feet_r_x = (global_positions[1:,fid_r,0] - global_positions[:-1,fid_r,0])**2
     feet_r_y = (global_positions[1:,fid_r,1] - global_positions[:-1,fid_r,1])**2
@@ -298,8 +321,8 @@ def process_heights(anim, nsamples=10, type='flat'):
     """ Foot Down Positions """
     
     feet_down = np.concatenate([
-        global_positions[feet_l[:,0],fid_l[0]] - np.array([0, heel_h, 0]),
-        global_positions[feet_l[:,1],fid_l[1]] - np.array([0,  toe_h, 0]),
+        global_positions[feet_l[:,0],fid_l[0]] - np.array([0, heel_h, 0]),   #左脚跟触地时,减去heel_h后，得到触地position[x,0,z]
+        global_positions[feet_l[:,1],fid_l[1]] - np.array([0,  toe_h, 0]),   #左脚趾触地
         global_positions[feet_r[:,0],fid_r[0]] - np.array([0, heel_h, 0]),
         global_positions[feet_r[:,1],fid_r[1]] - np.array([0,  toe_h, 0])
     ], axis=0)
@@ -315,7 +338,7 @@ def process_heights(anim, nsamples=10, type='flat'):
     
     """ Down Locations """
     
-    feet_down_xz = np.concatenate([feet_down[:,0:1], feet_down[:,2:3]], axis=-1)
+    feet_down_xz = np.concatenate([feet_down[:,0:1], feet_down[:,2:3]], axis=-1)  #将触地position[x,0,z]进行slice，变成[x,z]
     feet_down_xz_mean = feet_down_xz.mean(axis=0)
     feet_down_y = feet_down[:,1:2]
     feet_down_y_mean = feet_down_y.mean(axis=0)
@@ -328,7 +351,7 @@ def process_heights(anim, nsamples=10, type='flat'):
     
     if len(feet_down_xz) == 0:
     
-        """ No Contacts """
+        """ No Contacts """ #说明当前motion cycle中没有与地面接触
     
         terr_func = lambda Xp: np.zeros_like(Xp)[:,:1][np.newaxis].repeat(nsamples, axis=0)
         
@@ -348,7 +371,7 @@ def process_heights(anim, nsamples=10, type='flat'):
         terr_up_y = patchfunc(patches, feet_up_xz - feet_down_xz_mean)
         
         """ Fitting Error """
-        
+        #最小化（去均值后的terr_down_y - 去均值后的feet_down_y）^2
         terr_down_err = 0.1 * ((
             (terr_down_y - terr_down_y_mean[:,np.newaxis]) -
             (feet_down_y - feet_down_y_mean)[np.newaxis])**2)[...,0].mean(axis=1)
@@ -412,12 +435,16 @@ def process_heights(anim, nsamples=10, type='flat'):
         terr_residuals = feet_down_y - terr_basic_func(feet_down_xz)
         terr_fine_func = [RBF(smooth=0.1, function='linear') for _ in range(nsamples)]
         for i in range(nsamples): terr_fine_func[i].fit(feet_down_xz, terr_residuals[i])
+        #最终的terr_func应该是先进行basic func，后针对每个captured motion进行fine func
         terr_func = lambda Xp: (terr_basic_func(Xp) + np.array([ff(Xp) for ff in terr_fine_func]))
         
         
     """ Get Trajectory Terrain Heights """
     
+    #root的global position
     root_offsets_c = global_positions[:,0]
+    #root的rotation（四元数）左乘right方向上长度25的方向就可得到：相对于root坐标系的向右25长度的方向。再加上root坐标系的global position
+    #就得到右边25长度的global position
     root_offsets_r = (-root_rotation[:,0] * np.array([[+25, 0, 0]])) + root_offsets_c
     root_offsets_l = (-root_rotation[:,0] * np.array([[-25, 0, 0]])) + root_offsets_c
 
