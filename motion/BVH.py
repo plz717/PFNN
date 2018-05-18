@@ -25,7 +25,12 @@ ordermap = {
 def load(filename, start=None, end=None, order=None, world=False):
     """
     Reads a BVH file and constructs an animation
-    
+    关于BVH文件：
+    只有ROOT有6个通道数，其它节点有且只能有3个通道，这些通道只标志旋转信息。
+    以MOTION关键字标志开始的动作数据，后面是以Frames:标志帧数，Frame Time标记帧频。接下来就是令人眼花缭乱的数据了。但是这些数据有很强的规律可循：
+    帧数==数据的行数。换句话说，每一行的数据表示骨架各个分支在某帧中的姿势。
+    每行数据数==骨架所有节点的通道总和。因此可以根据通道来解析每一行的数据，做到按图索骥...
+    纵观各行，每一行数据的前三个元素为ROOT节点的平移量，剩余的数据全部是旋转信息。
     Parameters
     ----------
     filename: str
