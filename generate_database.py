@@ -122,7 +122,10 @@ patches_coord = patches_database['C'].astype(np.float32)
 def process_data(anim, phase, gait, type='flat'):
     #此函数用来准备训练数据所需的X,Y,以及control paras P
     """ Do FK """
-    global_xforms = Animation.transforms_global(anim)
+    global_xforms = Animation.transforms_global(anim)  #（4086，31，4，4）
+    
+    #（4086，31，3）=（4086，31，3）/（4086，31，1）  4086为当前clip中的frame，31为关节点数目，3为X,Y,Zposition
+    #global_xforms[:,:,3:,3]应该是（4，4）变换矩阵中的归一化系数
     global_positions = global_xforms[:,:,:3,3] / global_xforms[:,:,3:,3]
     global_rotations = Quaternions.from_transforms(global_xforms)
     
@@ -130,12 +133,13 @@ def process_data(anim, phase, gait, type='flat'):
     
     sdr_l, sdr_r, hip_l, hip_r = 18, 25, 2, 7
     across = (
-        (global_positions[:,sdr_l] - global_positions[:,sdr_r]) + 
+        (global_positions[:,sdr_l] - global_positions[:,sdr_r]) +  #沿着两肩膀的方向
         (global_positions[:,hip_l] - global_positions[:,hip_r]))
-    across = across / np.sqrt((across**2).sum(axis=-1))[...,np.newaxis]
+    across = across / np.sqrt((across**2).sum(axis=-1))[...,np.newaxis]  
     
     """ Smooth Forward Direction """
     
+    #np.cross(across, np.array([[0,1,0]])为求取与across和y轴（upward）都垂直的方向，即charactor的forward方向
     direction_filterwidth = 20
     forward = filters.gaussian_filter1d(
         np.cross(across, np.array([[0,1,0]])), direction_filterwidth, axis=0, mode='nearest')    
@@ -146,8 +150,8 @@ def process_data(anim, phase, gait, type='flat'):
     
     """ Local Space """
     
-    local_positions = global_positions.copy()
-    local_positions[:,:,0] = local_positions[:,:,0] - local_positions[:,0:1,0]
+    local_positions = global_positions.copy()  #（4086，31，3）
+    local_positions[:,:,0] = local_positions[:,:,0] - local_positions[:,0:1,0]  #当前位置的global pos减去root节点的global pos
     local_positions[:,:,2] = local_positions[:,:,2] - local_positions[:,0:1,2]
     
     local_positions = root_rotation[:-1] * local_positions[:-1]
@@ -242,17 +246,20 @@ def process_data(anim, phase, gait, type='flat'):
 
 def patchfunc(P, Xp, hscale=3.937007874, vscale=3.0):
     '''
-    P:patches
-    Xp:feet_down_xz - feet_down_xz_mean
+    应该是将patches组成的矩阵P移到以Xp为center的位置，并计算在此位置上的地形高度
+    P:patches  shape:(10,128,128)
+    Xp:feet_down_xz - feet_down_xz_mean  shape(201,2)
+    return:terrain_down_y
     '''
     #将Xp移到patch的中心
     Xp = Xp / hscale + np.array([P.shape[1]//2, P.shape[2]//2])
     
-    A = np.fmod(Xp, 1.0)   #将Xp中的元素分别对1.0求余
-    X0 = np.clip(np.floor(Xp).astype(np.int), 0, np.array([P.shape[1]-1, P.shape[2]-1]))
+    A = np.fmod(Xp, 1.0)   #将Xp中的元素分别对1.0求余:只保留小数部分
+    ##对Xp中元素向下取整，并clip为（127，127）之间
+    X0 = np.clip(np.floor(Xp).astype(np.int), 0, np.array([P.shape[1]-1, P.shape[2]-1]))  #shape（201，2）
     X1 = np.clip(np.ceil (Xp).astype(np.int), 0, np.array([P.shape[1]-1, P.shape[2]-1]))
     
-    H0 = P[:,X0[:,0],X0[:,1]]
+    H0 = P[:,X0[:,0],X0[:,1]] #（10，201）
     H1 = P[:,X0[:,0],X1[:,1]]
     H2 = P[:,X1[:,0],X0[:,1]]
     H3 = P[:,X1[:,0],X1[:,1]]
@@ -359,6 +366,8 @@ def process_heights(anim, nsamples=10, type='flat'):
         
         """ Flat """
         
+        #Xp shape:(201,2)  np.zeros_like(Xp)[:,:1]的目的只是创建一个(201,1)的矩阵，最后得到的结果为（nsamples，201，1）
+        #其中每个元素的值都等于feet_down_y_mean，也就是flat的地形，此时每个foot contact下地形height都为feet_down_y_mean
         terr_func = lambda Xp: np.zeros_like(Xp)[:,:1][np.newaxis].repeat(nsamples, axis=0) + feet_down_y_mean
     
     else:
@@ -435,20 +444,21 @@ def process_heights(anim, nsamples=10, type='flat'):
         terr_residuals = feet_down_y - terr_basic_func(feet_down_xz)
         terr_fine_func = [RBF(smooth=0.1, function='linear') for _ in range(nsamples)]
         for i in range(nsamples): terr_fine_func[i].fit(feet_down_xz, terr_residuals[i])
-        #最终的terr_func应该是先进行basic func，后针对每个captured motion进行fine func
+        #最终的terr_func应该是先进行basic func，后针对每个patch进行fine func
         terr_func = lambda Xp: (terr_basic_func(Xp) + np.array([ff(Xp) for ff in terr_fine_func]))
         
         
     """ Get Trajectory Terrain Heights """
     
     #root的global position
-    root_offsets_c = global_positions[:,0]
+    root_offsets_c = global_positions[:,0]  #（201，3）
     #root的rotation（四元数）左乘right方向上长度25的方向就可得到：相对于root坐标系的向右25长度的方向。再加上root坐标系的global position
     #就得到右边25长度的global position
     root_offsets_r = (-root_rotation[:,0] * np.array([[+25, 0, 0]])) + root_offsets_c
     root_offsets_l = (-root_rotation[:,0] * np.array([[-25, 0, 0]])) + root_offsets_c
-
-    root_heights_c = terr_func(root_offsets_c[:,np.array([0,2])])[...,0]
+    
+    #root_offsets_c[:,np.array([0,2])] shape:(201,2)
+    root_heights_c = terr_func(root_offsets_c[:,np.array([0,2])])[...,0]  #(10,201)
     root_heights_r = terr_func(root_offsets_r[:,np.array([0,2])])[...,0]
     root_heights_l = terr_func(root_offsets_l[:,np.array([0,2])])[...,0]
     
@@ -456,22 +466,22 @@ def process_heights(anim, nsamples=10, type='flat'):
     
     root_terrains = []
     root_averages = []
-    for i in range(window, len(anim)-window, 1): 
+    for i in range(window, len(anim)-window, 1):   #对每个window
         root_terrains.append(
             np.concatenate([
-                root_heights_r[:,i-window:i+window:10],
-                root_heights_c[:,i-window:i+window:10],
+                root_heights_r[:,i-window:i+window:10],   #shape(10, 12)
+                root_heights_c[:,i-window:i+window:10],   #shape(10, 12)
                 root_heights_l[:,i-window:i+window:10]], axis=1))
-        root_averages.append(root_heights_c[:,i-window:i+window:10].mean(axis=1))
+        root_averages.append(root_heights_c[:,i-window:i+window:10].mean(axis=1))  #计算此window中的12个sample的root heights的均值
      
-    root_terrains = np.swapaxes(np.array(root_terrains), 0, 1)
-    root_averages = np.swapaxes(np.array(root_averages), 0, 1)
+    root_terrains = np.swapaxes(np.array(root_terrains), 0, 1)   #(10,81,36)  81为window个数，每个window都有36个heights
+    root_averages = np.swapaxes(np.array(root_averages), 0, 1)   #（10，81）
     
     return root_terrains, root_averages
 
 """ Phases, Inputs, Outputs """
     
-P, X, Y = [], [], []
+P, X, Y = [], [], []   #用于存储所有phase，输入，输出
             
 for data in data_terrain:
     
@@ -517,8 +527,8 @@ for data in data_terrain:
     ], axis=-1)
 
     """ Preprocess Data """
-    
-    Pc, Xc, Yc = process_data(anim, phase, gait, type=type)
+    #shape:(3965,)  (3965,311)  (3965,306)
+    Pc, Xc, Yc = process_data(anim, phase, gait, type=type)  
 
     with open(data.replace('.bvh', '_footsteps.txt'), 'r') as f:
         footsteps = f.readlines()
@@ -526,6 +536,7 @@ for data in data_terrain:
     """ For each Locomotion Cycle fit Terrains """
     
     for li in range(len(footsteps)-1):
+        #for each cycle
     
         curr, next = footsteps[li+0].split(' '), footsteps[li+1].split(' ')
         
@@ -540,21 +551,27 @@ for data in data_terrain:
         """ Fit Heightmaps """
         
         slc = slice(int(curr[0])//2-window, int(next[0])//2-window+1)
+        
+        #|--【左脚帧-----------|--右脚帧】--|     这样保证左脚和右脚帧都在采样区间内，且每个帧都要在前后各自有past/future samples  
         H, Hmean = process_heights(anim[
             int(curr[0])//2-window:
-            int(next[0])//2+window+1], type=type)
+            int(next[0])//2+window+1], type=type)  #分别为（10，81，36） 以及（10，81）81为当前cycle中window数目
 
-        for h, hmean in zip(H, Hmean):
-            
+        for h, hmean in zip(H, Hmean):    
             Xh, Yh = Xc[slc].copy(), Yc[slc].copy()
             
-            """ Reduce Heights in Input/Output to Match"""
+            """ Reduce Heights in Input/Output to Match"""   
+            #由于Xh shape 为（81，306），表示81个window，每个window中采集了306条数据，
+            #其中，local_positions的index为120，121（y轴），122，因此Xh[:,121:213:3]表示所有window中的local_position的y值
             
-            xo_s, xo_e = ((window*2)//10)*10+1, ((window*2)//10)*10+njoints*3+1
-            yo_s, yo_e = 8+(window//10)*4+1, 8+(window//10)*4+njoints*3+1
+            xo_s, xo_e = ((window*2)//10)*10+1, ((window*2)//10)*10+njoints*3+1  #（121～213）
+            yo_s, yo_e = 8+(window//10)*4+1, 8+(window//10)*4+njoints*3+1  #（33～125）
+            #给Xh中每个local position都减去当前window的平均高度，即去均值操作
             Xh[:,xo_s:xo_e:3] -= hmean[...,np.newaxis]
             Yh[:,yo_s:yo_e:3] -= hmean[...,np.newaxis]
-            Xh = np.concatenate([Xh, h - hmean[...,np.newaxis]], axis=-1)
+            
+            #h shape:(81,36)  h_mean shape:(81,)
+            Xh = np.concatenate([Xh, h - hmean[...,np.newaxis]], axis=-1)  #由(81,306)变成(81,342)，加上了去均值后的terrian heights
             
             """ Append to Data """
             
