@@ -49,9 +49,9 @@ joint_weights = np.array([
     1e-10, 1, 1, 1, 1e-10, 1e-10, 1e-10,
     1e-10, 1, 1, 1, 1e-10, 1e-10, 1e-10]).repeat(3)
 
-Xstd[w*10+j*3*0:w*10+j*3*1] = Xstd[w*10+j*3*0:w*10+j*3*1].mean() / (joint_weights * 0.1) # Pos
-Xstd[w*10+j*3*1:w*10+j*3*2] = Xstd[w*10+j*3*1:w*10+j*3*2].mean() / (joint_weights * 0.1) # Vel
-Xstd[w*10+j*3*2:          ] = Xstd[w*10+j*3*2:          ].mean() # Terrain
+Xstd[w*10+j*3*0:w*10+j*3*1] = Xstd[w*10+j*3*0:w*10+j*3*1].mean() / (joint_weights * 0.1) # (index 范围为120~213)->joint Pos
+Xstd[w*10+j*3*1:w*10+j*3*2] = Xstd[w*10+j*3*1:w*10+j*3*2].mean() / (joint_weights * 0.1) # joint Vel
+Xstd[w*10+j*3*2:          ] = Xstd[w*10+j*3*2:          ].mean() # Terrain  #index范围（306～342）为terrian heights
 
 Ystd[0:2] = Ystd[0:2].mean() # Translational Velocity
 Ystd[2:3] = Ystd[2:3].mean() # Rotational Velocity
@@ -116,6 +116,7 @@ class PhaseFunctionedNetwork(Layer):
         Wamount = pamount.dimshuffle(0, 'x', 'x')
         bamount = pamount.dimshuffle(0, 'x')
         
+        #phase function with four control points:y0, y1, y2, y3
         def cubic(y0, y1, y2, y3, mu):
             return (
                 (-0.5*y0+1.5*y1-1.5*y2+0.5*y3)*mu*mu*mu + 
@@ -230,8 +231,9 @@ for me in range(20):
         start, stop = ((bi+0)*len(I))//10, ((bi+1)*len(I))//10
         
         """ Load Data to GPU and train """
-        
+        #input
         E = theano.shared(np.concatenate([X[I[start:stop]], P[I[start:stop]][...,np.newaxis]], axis=-1), borrow=True)
+        #output
         F = theano.shared(Y[I[start:stop]], borrow=True)
         trainer.train(network, E, F, filename='./demo/network/pfnn/network.npz', restart=False, shuffle=False)
         
